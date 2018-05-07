@@ -70,10 +70,31 @@ VehicleCommand QuadControl::GenerateMotorCommands(float collThrustCmd, V3F momen
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
 
-  cmd.desiredThrustsN[0] = mass * 9.81f / 4.f; // front left
-  cmd.desiredThrustsN[1] = mass * 9.81f / 4.f; // front right
-  cmd.desiredThrustsN[2] = mass * 9.81f / 4.f; // rear left
-  cmd.desiredThrustsN[3] = mass * 9.81f / 4.f; // rear right
+  float length = L / sqrtf(2.f);
+
+  // F_tot = F0 + F1 + F2 + F3
+  // tau_x = (F0 - F1 + F2 - F3) * length     // This is Roll
+  // tau_y = (F0 + F1 - F2 - F3) * length     // This is Pitch
+  // tau_z = (-F0 + F1 + F2 - F3) * kappa     // This is Yaw
+
+  float A = collThrustCmd;
+  float B = momentCmd.x / length;
+  float C = momentCmd.y / length;
+  float D = momentCmd.z / kappa;
+
+  // I used WolframAlpha to solve the system of equations to get:
+
+  float N0 = (A + B + C - D) / 4.f; // front left
+  float N1 = (A - B + C + D) / 4.f; // front right
+  float N2 = (A + B - C + D) / 4.f; // rear left
+  float N3 = (A - B - C - D) / 4.f; // rear right
+
+  // constrain each motor's thrust bu min and max motor thrust values 
+
+  cmd.desiredThrustsN[0] = CONSTRAIN(N0, minMotorThrust, maxMotorThrust);
+  cmd.desiredThrustsN[1] = CONSTRAIN(N1, minMotorThrust, maxMotorThrust);
+  cmd.desiredThrustsN[2] = CONSTRAIN(N2, minMotorThrust, maxMotorThrust);
+  cmd.desiredThrustsN[3] = CONSTRAIN(N3, minMotorThrust, maxMotorThrust);
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
@@ -96,9 +117,20 @@ V3F QuadControl::BodyRateControl(V3F pqrCmd, V3F pqr)
 
   V3F momentCmd;
 
+
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
 
+  V3F MOI;
   
+  MOI.x = Ixx;
+  MOI.y = Iyy;
+  MOI.z = Izz;
+
+  momentCmd = MOI * kpPQR * (pqrCmd - pqr);
+
+  // Limit the moments to the Max Torque value
+  // if np.linalg.norm(momentCmd) > MAX_TORQUE:
+  //	moments_cmd = momentCmd * MAX_TORQUE / np.linalg.norm(moments_cmd)
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
@@ -128,8 +160,44 @@ V3F QuadControl::RollPitchControl(V3F accelCmd, Quaternion<float> attitude, floa
   Mat3x3F R = attitude.RotationMatrix_IwrtB();
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  float b_x_dot;
+  float b_y_dot;
+  float R13_cmd;
+  float R23_cmd;
+  float R11 = R(0, 0);
+  float R12 = R(0, 1);
+  float R13 = R(0, 2);
+  float R21 = R(1, 0);
+  float R22 = R(1, 1);
+  float R23 = R(1, 2);
+  float R33 = R(2, 2);
 
+  // From lesson 14.16 we know that x_dot_dot = c * R13 and y_dot_dot = c * R23 where c is thrust_cmd / mass
+  // R13 is - sin(pitch) and R23 is sin(roll)*cos(pitch)
 
+  float c = -collThrustCmd / mass;
+
+  if (collThrustCmd > 0.0) {
+	  R13_cmd = accelCmd.x / c;
+	  R23_cmd = accelCmd.y / c;
+	  
+	  // limit the tilt angles using the max_tilt value
+	  R13_cmd = CONSTRAIN(R13_cmd, -maxTiltAngle, maxTiltAngle);
+	  R23_cmd = CONSTRAIN(R23_cmd, -maxTiltAngle, maxTiltAngle);
+
+	  b_x_dot = kpBank * (R13_cmd - R13);
+	  b_y_dot = kpBank * (R23_cmd - R23);
+
+	  pqrCmd.x = (1 / R33) * (R21 * b_x_dot - R11 * b_y_dot);
+	  pqrCmd.y = (1 / R33) * (R22 * b_x_dot - R12 * b_y_dot);
+  }
+  else {
+	  // If thrust is negative or = 0 then set pitch and roll rates to zero
+	  pqrCmd.x = 0.0;
+	  pqrCmd.y = 0.0;
+  }
+
+  pqrCmd.z = 0;
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
@@ -161,7 +229,26 @@ float QuadControl::AltitudeControl(float posZCmd, float velZCmd, float posZ, flo
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
 
+  velZCmd = CONSTRAIN(velZCmd, -maxAscentRate, maxDescentRate);  // need to limit vertical velocity by ascent / decent rates
 
+  float z_err = posZCmd - posZ;
+  float z_err_dot = velZCmd - velZ;
+
+  integratedAltitudeError = integratedAltitudeError + z_err * dt;
+
+  float b_z = R(2,2);   // This is matrix element R33
+
+  float p_term = kpPosZ * z_err;
+  float d_term = kpVelZ * z_err_dot + velZCmd;   // note that velZCmd is a ff velocity term
+  float i_term = KiPosZ * integratedAltitudeError;
+
+  float u_1_bar = p_term + d_term + i_term + accelZCmd;   // this is the desired vertical acceleration
+
+  //  Is there a better way to constrain ascent and descent rates???
+
+  float c = (u_1_bar - CONST_GRAVITY) / b_z;   // this is net acceleration in the drone's z-direction, also accounting for gravity
+
+  thrust = -c * mass;
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
   
@@ -169,7 +256,7 @@ float QuadControl::AltitudeControl(float posZCmd, float velZCmd, float posZ, flo
 }
 
 // returns a desired acceleration in global frame
-V3F QuadControl::LateralPositionControl(V3F posCmd, V3F velCmd, V3F pos, V3F vel, V3F accelCmd)
+V3F QuadControl::LateralPositionControl(V3F posCmd, V3F velCmd, V3F pos, V3F vel, V3F accelFF)
 {
   // Calculate a desired horizontal acceleration based on 
   //  desired lateral position/velocity/acceleration and current pose
@@ -183,19 +270,41 @@ V3F QuadControl::LateralPositionControl(V3F posCmd, V3F velCmd, V3F pos, V3F vel
   //   return a V3F with desired horizontal accelerations. 
   //     the Z component should be 0
   // HINTS: 
-  //  - use fmodf(foo,b) to constrain float foo to range [0,b]
+  //  - use CONSTRAIN to cap a value
   //  - use the gain parameters kpPosXY and kpVelXY
   //  - make sure you cap the horizontal velocity and acceleration
   //    to maxSpeedXY and maxAccelXY
 
   // make sure we don't have any incoming z-component
-  accelCmd.z = 0;
+  accelFF.z = 0;
   velCmd.z = 0;
   posCmd.z = pos.z;
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
 
+  float speed_cmd = sqrtf(velCmd.x*velCmd.x + velCmd.y*velCmd.y);  // calculate the speed being commanded
+
+  if (speed_cmd > maxSpeedXY) // if the commanded speed is too high then reduce
+  {
+	  velCmd = velCmd * maxSpeedXY / speed_cmd;
+  }
+
+  V3F pos_err = posCmd - pos;
+  V3F vel_err = velCmd - vel;
+
+  V3F p_term_xy = kpPosXY * pos_err;
+  V3F d_term_xy = kpVelXY * vel_err;
+
+  V3F accelCmd = p_term_xy + d_term_xy + accelFF;
   
+  accelCmd.z = 0;
+
+  float ac_cmd = sqrtf(accelCmd.x*accelCmd.x + accelCmd.y*accelCmd.y);  // calculate the magnitude of the acceleration being commanded
+
+  if (ac_cmd > maxAccelXY) // if the commanded acceleration is too high then reduce
+  {
+	  accelCmd = accelCmd * maxAccelXY / ac_cmd;
+  }
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
@@ -218,6 +327,29 @@ float QuadControl::YawControl(float yawCmd, float yaw)
   float yawRateCmd=0;
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
 
+  // Since yaw is decoupled from the other directions, we only need a P controller
+  
+  float Pi = 3.14159f;
+  float twoPi = 2.f * Pi;
+
+  yawCmd = fmodf(yawCmd, twoPi);  // constrain yaw to the range(0, 2pi)
+  yaw = fmodf(yaw, twoPi);
+
+  float yaw_err = yawCmd - yaw;
+
+  // We have a choice on which way to rotate the drone to get to the desired yaw angle
+  // And should pick the direction(CW or CCW) that requires the smaller rotation
+
+  if (yaw_err > Pi)
+  {
+	  yaw_err = yaw_err - twoPi;
+  }
+  else if (yaw_err < -Pi)
+  {
+	  yaw_err = yaw_err + twoPi;
+  }
+  
+  yawRateCmd = kpYaw * yaw_err;
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
 
