@@ -228,27 +228,28 @@ float QuadControl::AltitudeControl(float posZCmd, float velZCmd, float posZ, flo
   float thrust = 0;
 
   ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
-
-  velZCmd = CONSTRAIN(velZCmd, -maxAscentRate, maxDescentRate);  // need to limit vertical velocity by ascent / decent rates
-
+  
   float z_err = posZCmd - posZ;
-  float z_err_dot = velZCmd - velZ;
 
   integratedAltitudeError = integratedAltitudeError + z_err * dt;
 
   float b_z = R(2,2);   // This is matrix element R33
 
-  float p_term = kpPosZ * z_err;
-  float d_term = kpVelZ * z_err_dot + velZCmd;   // note that velZCmd is a ff velocity term
+  //float vel_z_des = kpPosZ * z_err + velZCmd;  // this is the desired velocity
+
+ // vel_z_des = CONSTRAIN(vel_z_des, -maxAscentRate, maxDescentRate);  // need to limit the desired vertical velocity by ascent / decent rates
+
+  float vel_z_des = kpPosZ * z_err + velZCmd;
+  vel_z_des = CONSTRAIN(vel_z_des, -maxAscentRate, maxDescentRate);
+
   float i_term = KiPosZ * integratedAltitudeError;
 
-  float u_1_bar = p_term + d_term + i_term + accelZCmd;   // this is the desired vertical acceleration
-
-  //  Is there a better way to constrain ascent and descent rates???
+  float u_1_bar = kpVelZ*(vel_z_des-velZ) + i_term + accelZCmd;   // this is the desired vertical acceleration
+  //float u_1_bar = kpVelZ * (kpPosZ * z_err - velZ) + i_term + accelZCmd;   // this is the desired vertical acceleration
 
   float c = (u_1_bar - CONST_GRAVITY) / b_z;   // this is net acceleration in the drone's z-direction, also accounting for gravity
 
-  thrust = -c * mass;
+  thrust = -c * mass;  // need positive thrust to move in negative z direction
 
   /////////////////////////////// END STUDENT CODE ////////////////////////////
   
